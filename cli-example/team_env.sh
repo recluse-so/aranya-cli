@@ -1,0 +1,2 @@
+TEAM_ID=8eGAcaqrdrnC3At5q8gweZysQtAb7chxKSq62WBEx1sv
+OWNER_DEVICE_ID=5iqrmvgd1nXUbmK6zhTjvR23Dvu5aNsC9seZb5eMctvS

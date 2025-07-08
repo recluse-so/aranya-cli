@@ -5,3 +5,7 @@
 *.tar.gz
 
 .vscode
+/scratch/aranya_scripts/target
+scratch/aranya_scripts/Cargo.lock
+/cli-example/aranya_scripts/target
+cli-example/aranya_scripts/Cargo.lock

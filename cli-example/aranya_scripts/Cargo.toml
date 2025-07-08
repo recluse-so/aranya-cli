@@ -1,0 +1,16 @@
+[package]
+name = "generate_aranya_keys"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aranya-crypto = { workspace = true, features = ["fs-keystore"] }
+aranya-keygen = { workspace = true }
+anyhow = "1.0"
+hex = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[[bin]]
+name = "generate_aranya_keys"
+path = "generate_aranya_keys.rs" 
