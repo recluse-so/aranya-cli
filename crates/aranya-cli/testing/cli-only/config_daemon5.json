@@ -1,0 +1,10 @@
+{
+    "name": "test_daemon_5",
+    "runtime_dir": "/tmp/aranya5/run",
+    "state_dir": "/tmp/aranya5/state", 
+    "cache_dir": "/tmp/aranya5/cache",
+    "logs_dir": "/tmp/aranya5/logs",
+    "config_dir": "/tmp/aranya5/config",
+    "sync_addr": "127.0.0.1:5059",
+    "quic_sync": {}
+}
