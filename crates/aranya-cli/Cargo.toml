@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "cryptography"]
 aranya-client = { path = "../aranya-client" }
 aranya-daemon-api = { path = "../aranya-daemon-api" }
 aranya-util = { path = "../aranya-util" }
+bytes = { version = "1.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
 anyhow = "1.0"

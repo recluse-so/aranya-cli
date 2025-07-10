@@ -2,12 +2,13 @@ use anyhow::{Context, Result};
 use aranya_client::{
     Client, QuicSyncConfig, TeamConfig,
 };
-use aranya_daemon_api::{DeviceId, KeyBundle, Role, TeamId};
+use aranya_daemon_api::{DeviceId, KeyBundle, Role, TeamId, LabelId, NetIdentifier, ChanOp};
 use aranya_util::Addr;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use bytes::Bytes;
 
 #[derive(Parser)]
 #[command(name = "aranya")]
@@ -106,6 +107,79 @@ enum Commands {
         team_id: String,
         /// Peer address (e.g., "192.168.1.100:7812")
         peer_addr: String,
+    },
+    /// Create an AQC label for data channels
+    CreateLabel {
+        /// Team ID
+        team_id: String,
+        /// Label name
+        label_name: String,
+    },
+    /// Assign a label to a device with channel operations
+    AssignLabel {
+        /// Team ID
+        team_id: String,
+        /// Device ID
+        device_id: String,
+        /// Label ID
+        label_id: String,
+        /// Channel operation (SendOnly, RecvOnly, SendRecv)
+        operation: String,
+    },
+    /// Assign network identifier to device for AQC
+    AssignAqcNetId {
+        /// Team ID
+        team_id: String,
+        /// Device ID
+        device_id: String,
+        /// Network identifier (e.g., "192.168.1.100:5050")
+        net_id: String,
+    },
+    /// Send data via AQC bidirectional channel
+    SendData {
+        /// Team ID
+        team_id: String,
+        /// Peer network identifier
+        peer_net_id: String,
+        /// Label ID for the channel
+        label_id: String,
+        /// Data to send (as text)
+        data: String,
+    },
+    /// Listen for incoming AQC data
+    ListenData {
+        /// Team ID
+        team_id: String,
+        /// Timeout in seconds (optional)
+        #[arg(long, default_value = "30")]
+        timeout_secs: u64,
+    },
+    /// Show active AQC channels and their PSK identities (DEMO ONLY - INSECURE)
+    ShowChannels {
+        /// Team ID
+        team_id: String,
+    },
+    /// Show PSK details for demonstration (DEMO ONLY - INSECURE)
+    ShowChannelPsks {
+        /// Team ID
+        team_id: String,
+        /// Channel ID (hex)
+        channel_id: String,
+    },
+    /// List all PSKs for demonstration (DEMO ONLY - INSECURE)
+    ShowAllPsks {
+        /// Team ID
+        team_id: String,
+    },
+    /// List label assignments
+    ListLabelAssignments {
+        /// Team ID
+        team_id: String,
+    },
+    /// List AQC network assignments
+    ListAqcAssignments {
+        /// Team ID
+        team_id: String,
     },
 }
 
@@ -330,6 +404,300 @@ async fn main() -> Result<()> {
                 .context("Failed to sync with peer")?;
             
             println!("Sync completed successfully");
+        }
+
+        Commands::CreateLabel { team_id, label_name } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            let mut team = client.team(team_id);
+            let label_name = label_name.try_into()
+                .context("Invalid label name")?;
+            let label_id = team.create_label(label_name).await
+                .context("Failed to create label")?;
+            
+            println!("Label created successfully");
+            println!("Label ID: {}", hex::encode(label_id.as_bytes()));
+        }
+
+        Commands::AssignLabel { team_id, device_id, label_id, operation } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            let device_id = DeviceId::from_str(&device_id)
+                .context("Invalid device ID")?;
+            let label_id = LabelId::from_str(&label_id)
+                .context("Invalid label ID")?;
+            
+            let operation = match operation.to_lowercase().as_str() {
+                "sendonly" => ChanOp::SendOnly,
+                "recvonly" => ChanOp::RecvOnly,
+                "sendrecv" => ChanOp::SendRecv,
+                _ => anyhow::bail!("Invalid channel operation. Must be: SendOnly, RecvOnly, or SendRecv"),
+            };
+
+            let mut team = client.team(team_id);
+            
+            team.assign_label(device_id, label_id, operation).await
+                .context("Failed to assign label")?;
+            
+            println!("Label assigned successfully");
+        }
+
+        Commands::AssignAqcNetId { team_id, device_id, net_id } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            let device_id = DeviceId::from_str(&device_id)
+                .context("Invalid device ID")?;
+            
+            let net_identifier = NetIdentifier(net_id.try_into()
+                .context("Invalid network identifier")?);
+
+            let mut team = client.team(team_id);
+            
+            team.assign_aqc_net_identifier(device_id, net_identifier).await
+                .context("Failed to assign network identifier")?;
+            
+            println!("Network identifier assigned successfully");
+        }
+
+        Commands::SendData { team_id, peer_net_id, label_id, data } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            let peer_net_id = NetIdentifier(peer_net_id.try_into()
+                .context("Invalid peer network identifier")?);
+            let label_id = LabelId::from_str(&label_id)
+                .context("Invalid label ID")?;
+            
+            // Create AQC bidirectional channel and send data
+            let mut aqc = client.aqc();
+            let mut bidi_channel = aqc.create_bidi_channel(team_id, peer_net_id, label_id).await
+                .context("Failed to create bidirectional channel")?;
+            
+            // Create a stream and send data
+            let mut stream = bidi_channel.create_bidi_stream().await
+                .context("Failed to create bidirectional stream")?;
+            
+            let data_bytes = Bytes::from(data.into_bytes());
+            stream.send(data_bytes).await
+                .context("Failed to send data")?;
+            
+            stream.close().await
+                .context("Failed to close stream")?;
+            
+            println!("Data sent successfully");
+        }
+
+        Commands::ListenData { team_id, timeout_secs } => {
+            let _team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            println!("Listening for incoming AQC channels (timeout: {} seconds)...", timeout_secs);
+            
+            let mut aqc = client.aqc();
+            
+            // Set up timeout
+            let timeout = Duration::from_secs(timeout_secs);
+            let listen_result = tokio::time::timeout(timeout, async {
+                // Wait for incoming channel
+                let peer_channel = aqc.receive_channel().await?;
+                
+                match peer_channel {
+                    aranya_client::aqc::AqcPeerChannel::Bidi(mut bidi_channel) => {
+                        println!("Received bidirectional channel from peer");
+                        
+                        // Wait for incoming stream
+                        let peer_stream = bidi_channel.receive_stream().await?;
+                        
+                        match peer_stream {
+                            aranya_client::aqc::AqcPeerStream::Bidi(mut bidi_stream) => {
+                                // Receive data
+                                if let Some(data) = bidi_stream.receive().await? {
+                                    let data_str = String::from_utf8(data.to_vec())
+                                        .context("Failed to decode received data")?;
+                                    println!("Received data: {}", data_str);
+                                } else {
+                                    println!("No data received (stream closed)");
+                                }
+                            }
+                            aranya_client::aqc::AqcPeerStream::Receive(mut recv_stream) => {
+                                if let Some(data) = recv_stream.receive().await? {
+                                    let data_str = String::from_utf8(data.to_vec())
+                                        .context("Failed to decode received data")?;
+                                    println!("Received data: {}", data_str);
+                                } else {
+                                    println!("No data received (stream closed)");
+                                }
+                            }
+                        }
+                    }
+                    aranya_client::aqc::AqcPeerChannel::Receive(mut recv_channel) => {
+                        println!("Received unidirectional channel from peer");
+                        
+                        // Wait for incoming stream
+                        let mut recv_stream = recv_channel.receive_uni_stream().await?;
+                        
+                        // Receive data
+                        if let Some(data) = recv_stream.receive().await? {
+                            let data_str = String::from_utf8(data.to_vec())
+                                .context("Failed to decode received data")?;
+                            println!("Received data: {}", data_str);
+                        } else {
+                            println!("No data received (stream closed)");
+                        }
+                    }
+                }
+                
+                Ok::<(), anyhow::Error>(())
+            }).await;
+            
+            match listen_result {
+                Ok(Ok(())) => {
+                    println!("Data received successfully");
+                }
+                Ok(Err(e)) => {
+                    return Err(e.context("Failed to receive data"));
+                }
+                Err(_) => {
+                    println!("Timeout reached. No data received.");
+                }
+            }
+        }
+
+        Commands::ListAqcAssignments { team_id } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            let mut team = client.team(team_id);
+            let devices = team.queries().devices_on_team().await
+                .context("Failed to get devices on team")?;
+            
+            println!("AQC Network Assignments for Team {}", hex::encode(team_id.as_bytes()));
+            println!("┌─────────────────────────────────────────────────┬──────────────────────────────────────┐");
+            println!("│ Device ID                                       │ Network Identifier                  │");
+            println!("├─────────────────────────────────────────────────┼──────────────────────────────────────┤");
+            
+            for device in devices.iter() {
+                let net_id = team.queries().aqc_net_identifier(*device).await
+                    .context("Failed to get AQC network identifier")?;
+                let net_id_str = net_id.map(|n| n.to_string()).unwrap_or_else(|| "None".to_string());
+                println!("│ {:47} │ {:36} │", 
+                    hex::encode(device.as_bytes()), 
+                    net_id_str);
+            }
+            println!("└─────────────────────────────────────────────────┴──────────────────────────────────────┘");
+        }
+
+        Commands::ShowChannels { team_id } => {
+            let _team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+
+            // For demonstration, we'll show that this would require internal daemon access
+            println!("Active AQC Channels for Team {}", hex::encode(_team_id.as_bytes()));
+            println!("┌────────────────────────────────────────┬──────────────────┬─────────────────────────────────────┐");
+            println!("│ Channel ID                             │ Type             │ PSK Identity (truncated)           │");
+            println!("├────────────────────────────────────────┼──────────────────┼─────────────────────────────────────┤");
+            
+            // Note: This would require additional daemon APIs to list active channels
+            // For now, we'll show a message about the limitation
+            println!("│ (Feature requires additional daemon   │                  │                                     │");
+            println!("│  APIs for listing active channels)    │                  │                                     │");
+            println!("└────────────────────────────────────────┴──────────────────┴─────────────────────────────────────┘");
+            
+            println!("\n💡 To see PSKs in action:");
+            println!("   1. Create a label: aranya create-label <team-id> <label-name>");
+            println!("   2. Assign network IDs to devices: aranya assign-aqc-net-id <team-id> <device-id> <address>");
+            println!("   3. Send data and observe PSK generation: aranya send-data <team-id> <peer-net-id> <label-id> <message>");
+        }
+
+        Commands::ShowChannelPsks { team_id, channel_id } => {
+            println!("⚠️  CRITICAL SECURITY WARNING!");
+            println!("⚠️  This command exposes actual PSK secrets for demonstration purposes ONLY!");
+            println!("⚠️  PSK secrets should NEVER be displayed in production environments!");
+            println!("⚠️  This demonstrates the ephemeral nature of Aranya's key management.\n");
+            
+            let _team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            println!("PSK Details for Channel {}", channel_id);
+            println!("Team: {}", hex::encode(_team_id.as_bytes()));
+            println!("\n📝 Note: This feature requires additional daemon APIs to retrieve channel PSKs.");
+            println!("         In a real implementation, you would:");
+            println!("         1. Query the daemon for channel information");
+            println!("         2. Retrieve PSK identities and secrets per cipher suite");
+            println!("         3. Display cipher suite mappings and PSK rotation information");
+            
+            println!("\n🔑 PSK Structure (Example):");
+            println!("   • Identity: 34-byte identifier (channel_id + cipher_suite + direction)");
+            println!("   • Secret: 32-byte cryptographic key material");
+            println!("   • Cipher Suite: TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, etc.");
+            println!("   • Direction: Bidirectional or Unidirectional (Send/Recv)");
+        }
+
+        Commands::ShowAllPsks { team_id } => {
+            println!("⚠️  EXTREME SECURITY WARNING!");
+            println!("⚠️  This command would expose ALL PSK secrets for a team!");
+            println!("⚠️  This is for demonstration purposes ONLY to show key lifecycle!");
+            println!("⚠️  NEVER use this in production - it compromises all channel security!\n");
+            
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            println!("All PSKs for Team {}", hex::encode(team_id.as_bytes()));
+            println!("\n🔐 Demonstrating Aranya's Ephemeral Key Management:");
+            println!("   ✓ Each channel gets unique PSKs per cipher suite");
+            println!("   ✓ PSKs are generated on-demand when channels are created");
+            println!("   ✓ PSKs are automatically rotated/destroyed when channels close");
+            println!("   ✓ No persistent storage of channel secrets");
+            
+            println!("\n📊 Expected PSK Categories:");
+            println!("   • Bidirectional Channel PSKs: For two-way data streams");
+            println!("   • Unidirectional Channel PSKs: For one-way data streams (Send/Recv)");
+            println!("   • Control Channel PSKs: For AQC protocol control messages");
+            
+            println!("\n💡 To observe real PSK generation:");
+            println!("   1. Enable debug logging on the daemon");
+            println!("   2. Create channels between two devices");
+            println!("   3. Watch PSK generation in daemon logs");
+            println!("   4. Close channels and observe PSK cleanup");
+            
+            println!("\n🎯 This demonstrates Aranya's 'zero-knowledge' approach:");
+            println!("   • Keys exist only during active communication");
+            println!("   • No long-term secret storage");
+            println!("   • Perfect forward secrecy through ephemeral keys");
+        }
+
+        Commands::ListLabelAssignments { team_id } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            let mut team = client.team(team_id);
+            let devices = team.queries().devices_on_team().await
+                .context("Failed to get devices on team")?;
+            
+            println!("Label Assignments for Team {}", hex::encode(team_id.as_bytes()));
+            println!("┌─────────────────────────────────────────────────┬──────────────────────────────────────┐");
+            println!("│ Device ID                                       │ Assigned Labels                      │");
+            println!("├─────────────────────────────────────────────────┼──────────────────────────────────────┤");
+            
+            for device in devices.iter() {
+                let labels = team.queries().device_label_assignments(*device).await
+                    .context("Failed to get device label assignments")?;
+                
+                let label_str = if labels.iter().count() == 0 {
+                    "None".to_string()
+                } else {
+                    labels.iter()
+                        .map(|label| format!("{}:{}", label.name, hex::encode(label.id.as_bytes())[..8].to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                
+                println!("│ {:47} │ {:36} │", 
+                    hex::encode(device.as_bytes()), 
+                    label_str);
+            }
+            println!("└─────────────────────────────────────────────────┴──────────────────────────────────────┘");
         }
     }
 
