@@ -56,9 +56,18 @@ aranya --uds-path /tmp/aranya1/run/uds.sock \
 echo "Waiting for synchronization..."
 sleep 3
 
-echo "Assigning admin role to device 2..."
-aranya --uds-path /tmp/aranya1/run/uds.sock \
-    assign-role $MAIN_TEAM_ID ${DEVICE_IDS[2]} Admin
+# Assign admin role to device 2 (from owner)
+echo "Waiting for device 2 to join team..."
+for i in {1..10}; do
+  DEV2_PRESENT=$(aranya --uds-path /tmp/aranya1/run/uds.sock list-devices $MAIN_TEAM_ID | grep "${DEVICE_IDS[2]}")
+  if [ -n "$DEV2_PRESENT" ]; then
+    echo "Device 2 joined."
+    break
+  fi
+  sleep 1
+done
+echo "Assigning admin role to device 2 (from owner)..."
+aranya --uds-path /tmp/aranya1/run/uds.sock assign-role $MAIN_TEAM_ID ${DEVICE_IDS[2]} Admin
 
 # Add device 3 and assign operator role
 echo "Adding device 3 to team 1..."
@@ -69,9 +78,28 @@ aranya --uds-path /tmp/aranya1/run/uds.sock \
 echo "Waiting for synchronization..."
 sleep 3
 
-echo "Assigning operator role to device 3..."
-aranya --uds-path /tmp/aranya1/run/uds.sock \
-    assign-role $MAIN_TEAM_ID ${DEVICE_IDS[3]} Operator
+# Assign operator role to device 3 (from owner)
+echo "Waiting for device 3 to join team..."
+for i in {1..10}; do
+  DEV3_PRESENT=$(aranya --uds-path /tmp/aranya1/run/uds.sock list-devices $MAIN_TEAM_ID | grep "${DEVICE_IDS[3]}")
+  if [ -n "$DEV3_PRESENT" ]; then
+    echo "Device 3 joined."
+    break
+  fi
+  sleep 1
+done
+echo "Assigning operator role to device 3 (from owner)..."
+aranya --uds-path /tmp/aranya1/run/uds.sock assign-role $MAIN_TEAM_ID ${DEVICE_IDS[3]} Operator
+
+echo "Waiting for devices to sync after role assignments..."
+sleep 3
+
+# Assign network IDs only after roles are set and devices are synced
+echo "=== Assigning AQC Network Identifiers ==="
+echo "Assigning network ID to device 1: ${DEVICE_IDS[1]}"
+aranya --uds-path /tmp/aranya1/run/uds.sock assign-aqc-net-id $MAIN_TEAM_ID ${DEVICE_IDS[1]} 127.0.0.1:6001
+echo "Assigning network ID to device 2: ${DEVICE_IDS[2]}"
+aranya --uds-path /tmp/aranya1/run/uds.sock assign-aqc-net-id $MAIN_TEAM_ID ${DEVICE_IDS[2]} 127.0.0.1:6002
 
 echo ""
 echo "=== Listing all devices in team 1 ==="
@@ -103,13 +131,13 @@ echo "=== Creating AQC Labels ==="
 echo "Creating 'sensor-data' label..."
 SENSOR_LABEL_OUTPUT=$(aranya --uds-path /tmp/aranya1/run/uds.sock -v create-label $MAIN_TEAM_ID "sensor-data")
 echo "Full sensor label output: $SENSOR_LABEL_OUTPUT"
-SENSOR_LABEL_ID=$(echo "$SENSOR_LABEL_OUTPUT" | grep "Label ID:" | cut -d' ' -f3)
+SENSOR_LABEL_ID=$(echo "$SENSOR_LABEL_OUTPUT" | grep "Label ID:" | awk '{print $3}')
 echo "Sensor data label ID: $SENSOR_LABEL_ID"
 
 echo "Creating 'control-commands' label..."
 CONTROL_LABEL_OUTPUT=$(aranya --uds-path /tmp/aranya1/run/uds.sock -v create-label $MAIN_TEAM_ID "control-commands")
 echo "Full control label output: $CONTROL_LABEL_OUTPUT"
-CONTROL_LABEL_ID=$(echo "$CONTROL_LABEL_OUTPUT" | grep "Label ID:" | cut -d' ' -f3)
+CONTROL_LABEL_ID=$(echo "$CONTROL_LABEL_OUTPUT" | grep "Label ID:" | awk '{print $3}')
 echo "Control commands label ID: $CONTROL_LABEL_ID"
 
 echo ""
@@ -199,6 +227,9 @@ aranya --uds-path /tmp/aranya1/run/uds.sock -v list-aqc-assignments $MAIN_TEAM_I
 echo ""
 echo "=== Testing Data Transmission & Key Rotation ==="
 
+# Initialize run counter
+RUN_NUM=1
+
 # Only proceed with data transmission if we have valid labels
 if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
     
@@ -218,7 +249,7 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
 
     # Start listener in background
     (aranya --uds-path /tmp/aranya1/run/uds.sock \
-        listen-data $MAIN_TEAM_ID --timeout-secs 10) &
+        listen-data $MAIN_TEAM_ID --timeout 10) &
     LISTENER_PID=$!
 
     # Wait a moment for listener to start
@@ -246,6 +277,12 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
     # Wait a moment for cleanup
     sleep 2
     
+    # Capture PSKs after this run
+    echo "Capturing PSKs for run ${RUN_NUM}..."
+    aranya --uds-path /tmp/aranya1/run/uds.sock show-all-psks $MAIN_TEAM_ID > /tmp/psks_run${RUN_NUM}.txt 2>&1
+    echo "PSK capture for run ${RUN_NUM} completed. File size: $(wc -c < /tmp/psks_run${RUN_NUM}.txt) bytes"
+    ((RUN_NUM++))
+    
     echo ""
     echo "🔄 CHANNEL LIFECYCLE TEST 2: Control Command Channel" 
     echo "===================================================="
@@ -262,7 +299,7 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
 
     # Start listener in background
     (aranya --uds-path /tmp/aranya1/run/uds.sock \
-        listen-data $MAIN_TEAM_ID --timeout-secs 10) &
+        listen-data $MAIN_TEAM_ID --timeout 10) &
     LISTENER_PID=$!
 
     # Wait a moment for listener to start
@@ -290,6 +327,12 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
     # Wait a moment for cleanup
     sleep 2
     
+    # Capture PSKs after this run
+    echo "Capturing PSKs for run ${RUN_NUM}..."
+    aranya --uds-path /tmp/aranya1/run/uds.sock show-all-psks $MAIN_TEAM_ID > /tmp/psks_run${RUN_NUM}.txt 2>&1
+    echo "PSK capture for run ${RUN_NUM} completed. File size: $(wc -c < /tmp/psks_run${RUN_NUM}.txt) bytes"
+    ((RUN_NUM++))
+    
     echo ""
     echo "🔄 CHANNEL LIFECYCLE TEST 3: Second Sensor Channel (Key Rotation Test)"
     echo "====================================================================="
@@ -300,7 +343,7 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
 
     # Start listener in background
     (aranya --uds-path /tmp/aranya1/run/uds.sock \
-        listen-data $MAIN_TEAM_ID --timeout-secs 10) &
+        listen-data $MAIN_TEAM_ID --timeout 10) &
     LISTENER_PID=$!
 
     # Wait a moment for listener to start
@@ -324,10 +367,16 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
     wait $LISTENER_PID
     echo "4. Second sensor channel closed automatically."
     
+    # Capture PSKs after this run
+    echo "Capturing PSKs for run ${RUN_NUM}..."
+    aranya --uds-path /tmp/aranya1/run/uds.sock show-all-psks $MAIN_TEAM_ID > /tmp/psks_run${RUN_NUM}.txt 2>&1
+    echo "PSK capture for run ${RUN_NUM} completed. File size: $(wc -c < /tmp/psks_run${RUN_NUM}.txt) bytes"
+    ((RUN_NUM++))
+    
     # Combine all PSK data for comprehensive analysis
     ALL_PSK_IDENTITIES=("${SENSOR_PSK_IDENTITIES[@]}" "${CONTROL_PSK_IDENTITIES[@]}" "${ROTATED_PSK_IDENTITIES[@]}")
     ALL_PSK_SECRETS=("${SENSOR_PSK_SECRETS[@]}" "${CONTROL_PSK_SECRETS[@]}" "${ROTATED_PSK_SECRETS[@]}")
-    
+
     echo ""
     echo "🔍 KEY ROTATION ANALYSIS:"
     echo "========================"
@@ -349,6 +398,8 @@ if [ -n "$SENSOR_LABEL_ID" ] && [ -n "$CONTROL_LABEL_ID" ]; then
 
 else
     echo "Skipping data transmission tests due to missing label IDs."
+    echo "SENSOR_LABEL_ID: '$SENSOR_LABEL_ID'"
+    echo "CONTROL_LABEL_ID: '$CONTROL_LABEL_ID'"
 fi
 
 echo ""
@@ -619,5 +670,49 @@ echo ""
 echo "=================================================="
 echo "End of AQC Channels Test Summary"
 echo "=================================================="
+
+echo ""
+echo "=== PSK Comparison Across Runs ==="
+echo "Checking for PSK capture files..."
+# Check which PSK files exist
+PSK_FILES_FOUND=0
+for i in 1 2 3; do
+    if [ -f "/tmp/psks_run${i}.txt" ]; then
+        LINES=$(wc -l < /tmp/psks_run${i}.txt)
+        echo "PSK file ${i} exists: ${LINES} lines"
+        ((PSK_FILES_FOUND++))
+    else
+        echo "PSK file ${i} missing!"
+    fi
+done
+
+if [ $PSK_FILES_FOUND -eq 0 ]; then
+    echo "⚠️  No PSK files found - channel tests may not have run successfully"
+    echo "   This could be due to:"
+    echo "   • Missing or invalid label IDs"
+    echo "   • Authorization errors during label assignment"
+    echo "   • Network ID assignment failures"
+    echo "   • Channel creation failures"
+fi
+
+# Only run comparisons if we have files to compare
+if [ $PSK_FILES_FOUND -gt 1 ]; then
+    echo ""
+    echo "Comparing PSKs across runs..."
+    for i in 1 2 3; do
+        for j in 1 2 3; do
+            if [ $i -ne $j ] && [ -f "/tmp/psks_run${i}.txt" ] && [ -f "/tmp/psks_run${j}.txt" ]; then
+                echo "Comparing PSKs: Run ${i} vs Run ${j}"
+                if diff "/tmp/psks_run${i}.txt" "/tmp/psks_run${j}.txt" > /dev/null; then
+                    echo "   ⚠️  SAME PSKs detected - may indicate key reuse"
+                else
+                    echo "   ✅ DIFFERENT PSKs detected - key rotation working"
+                fi
+            fi
+        done
+    done
+else
+    echo "Skipping PSK comparisons - insufficient files for comparison"
+fi
 
 

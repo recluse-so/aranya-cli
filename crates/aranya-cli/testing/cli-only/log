@@ -1,0 +1,20 @@
+=== Creating teams on each daemon ===
+Creating team on daemon 1...
+Daemon 1 - Team ID: JACksk94MyfGmw2f4kxHjFwHsFVwpZ7LzsCeaddqfg8m
+Daemon 1 - Device ID: Device
+
+Creating team on daemon 2...
+Daemon 2 - Team ID: 7xncY7769rfdxUNECuVT6mrqDAQacXGVR8eBVVJwGgG4
+Daemon 2 - Device ID: Device
+
+Creating team on daemon 3...
+Daemon 3 - Team ID: F7QLtTSWzzkVz9ygMsaW42aq9vnt6HALquB2Ufmhkyfo
+Daemon 3 - Device ID: Device
+
+=== Adding devices 2-3 to team 1 ===
+Main team ID (from daemon 1): JACksk94MyfGmw2f4kxHjFwHsFVwpZ7LzsCeaddqfg8m
+Adding device 2 to team 1...
+[2m2025-07-10T21:50:12.521091Z[0m [32m INFO[0m [1mconnect[0m[2m:[0m [2maranya_client::client[0m[2m:[0m connecting to daemon [3mpath[0m[2m=[0m"/tmp/aranya1/run/uds.sock"
+Device added successfully
+Note: The device ID will be visible once the device joins the team
+Waiting for synchronization...

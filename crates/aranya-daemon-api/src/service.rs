@@ -565,52 +565,6 @@ pub struct SyncPeerConfig {
     pub sync_now: bool,
 }
 
-/// Information about an active AQC channel
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AqcChannelInfo {
-    /// The channel ID
-    pub channel_id: AqcChannelId,
-    /// The type of channel
-    pub channel_type: AqcChannelType,
-    /// The label ID associated with this channel
-    pub label_id: LabelId,
-    /// The peer device ID
-    pub peer_device_id: DeviceId,
-    /// Channel status
-    pub status: AqcChannelStatus,
-}
-
-/// AQC Channel ID that can represent both bidi and uni channels
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AqcChannelId {
-    /// Bidirectional channel ID
-    Bidi(AqcBidiChannelId),
-    /// Unidirectional channel ID
-    Uni(AqcUniChannelId),
-}
-
-/// Type of AQC channel
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AqcChannelType {
-    /// Bidirectional channel
-    Bidirectional,
-    /// Unidirectional channel
-    Unidirectional,
-}
-
-/// Status of an AQC channel
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AqcChannelStatus {
-    /// Channel is active and ready for communication
-    Active,
-    /// Channel is in the process of being established
-    Connecting,
-    /// Channel is in the process of being closed
-    Closing,
-    /// Channel has been closed
-    Closed,
-}
-
 /// Valid channel operations for a label assignment.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum ChanOp {
@@ -744,9 +698,6 @@ pub trait DaemonApi {
     async fn query_labels(team: TeamId) -> Result<Vec<Label>>;
     /// Query whether a label exists.
     async fn query_label_exists(team: TeamId, label: LabelId) -> Result<bool>;
-    
-    /// List active AQC channels.
-    async fn list_aqc_channels(team: TeamId) -> Result<Vec<AqcChannelInfo>>;
 }
 
 #[cfg(test)]
