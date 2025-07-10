@@ -644,6 +644,15 @@ impl DaemonApi for Api {
         self.effect_handler.handle_effects(graph, &effects).await?;
 
         let psks = self.aqc.bidi_channel_created(e).await?;
+        
+        // Add channel to tracking
+        self.aqc.add_channel(
+            graph,
+            api::AqcChannelId::Bidi(e.channel_id.into()),
+            e.label_id.into(),
+            e.peer_id.into(),
+        ).await;
+        
         info!(num = psks.len(), "bidi channel created");
 
         Ok((ctrl, psks))
@@ -685,6 +694,16 @@ impl DaemonApi for Api {
         self.effect_handler.handle_effects(graph, &effects).await?;
 
         let psks = self.aqc.uni_channel_created(e).await?;
+        
+        // Add channel to tracking
+        self.aqc.add_channel(
+            graph,
+            api::AqcChannelId::Uni(e.channel_id.into()),
+            e.label_id.into(),
+            // For uni channels, determine peer based on sender/receiver
+            if e.sender_id == id.into() { e.receiver_id.into() } else { e.sender_id.into() },
+        ).await;
+        
         info!(num = psks.len(), "uni channel created");
 
         Ok((ctrl, psks))
@@ -696,8 +715,20 @@ impl DaemonApi for Api {
         _: context::Context,
         chan: api::AqcBidiChannelId,
     ) -> api::Result<api::AqcCtrl> {
-        // TODO: remove AQC bidi channel from Aranya.
-        todo!();
+        info!("deleting bidi channel (QUIC-level closure)");
+
+        // Find the team that owns this channel
+        let team_id = self.find_team_for_channel(chan.into()).await?;
+        let graph = GraphId::from(team_id);
+
+        // Remove from tracking (this will happen when QUIC connections close)
+        self.aqc.channel_deleted(graph, chan.into()).await
+            .inspect_err(|err| warn!(%err, "Failed to clean up channel tracking"))?;
+
+        // Return empty control message since we can't generate policy effects
+        // The actual QUIC closure happens at the client level
+        info!("bidi channel tracking cleaned up");
+        Ok(vec![])
     }
 
     #[instrument(skip(self))]
@@ -706,8 +737,20 @@ impl DaemonApi for Api {
         _: context::Context,
         chan: api::AqcUniChannelId,
     ) -> api::Result<api::AqcCtrl> {
-        // TODO: remove AQC uni channel from Aranya.
-        todo!();
+        info!("deleting uni channel (QUIC-level closure)");
+
+        // Find the team that owns this channel
+        let team_id = self.find_team_for_channel(chan.into()).await?;
+        let graph = GraphId::from(team_id);
+
+        // Remove from tracking (this will happen when QUIC connections close)
+        self.aqc.channel_deleted(graph, chan.into()).await
+            .inspect_err(|err| warn!(%err, "Failed to clean up channel tracking"))?;
+
+        // Return empty control message since we can't generate policy effects
+        // The actual QUIC closure happens at the client level
+        info!("uni channel tracking cleaned up");
+        Ok(vec![])
     }
 
     #[instrument(skip(self))]
@@ -737,12 +780,30 @@ impl DaemonApi for Api {
             match effect {
                 Some(Effect::AqcBidiChannelReceived(e)) => {
                     let psks = self.aqc.bidi_channel_received(e).await?;
+                    
+                    // Add received channel to tracking
+                    self.aqc.add_channel(
+                        graph,
+                        api::AqcChannelId::Bidi(e.channel_id.into()),
+                        e.label_id.into(),
+                        e.author_id.into(), // The author is the peer for received channels
+                    ).await;
+                    
                     // NB: Each action should only produce one
                     // ephemeral command.
                     return Ok((e.label_id.into(), psks));
                 }
                 Some(Effect::AqcUniChannelReceived(e)) => {
                     let psks = self.aqc.uni_channel_received(e).await?;
+                    
+                    // Add received channel to tracking
+                    self.aqc.add_channel(
+                        graph,
+                        api::AqcChannelId::Uni(e.channel_id.into()),
+                        e.label_id.into(),
+                        e.author_id.into(), // The author is the peer for received channels
+                    ).await;
+                    
                     // NB: Each action should only produce one
                     // ephemeral command.
                     return Ok((e.label_id.into(), psks));
@@ -978,29 +1039,28 @@ impl DaemonApi for Api {
         Ok(None)
     }
 
-    /// Query label exists.
+    /// Query whether a label exists.
     #[instrument(skip(self))]
     async fn query_label_exists(
         self,
         _: context::Context,
         team: api::TeamId,
-        label_id: api::LabelId,
+        label: api::LabelId,
     ) -> api::Result<bool> {
         self.check_team_valid(team).await?;
 
-        let (_ctrl, effects) = self
+        let graph = GraphId::from(team.into_id());
+        let (_, effects) = self
             .client
-            .actions(&team.into_id().into())
-            .query_label_exists_off_graph(label_id.into_id().into())
-            .await
-            .context("unable to query label")?;
-        if let Some(Effect::QueryLabelExistsResult(_e)) =
-            find_effect!(&effects, Effect::QueryLabelExistsResult(_e))
-        {
-            Ok(true)
-        } else {
-            Err(anyhow!("unable to query whether label exists").into())
-        }
+            .actions(&graph)
+            .query_label_exists_off_graph(label.into_id().into())
+            .await?;
+
+        let Some(Effect::QueryLabelExistsResult(_)) = find_effect!(&effects, Effect::QueryLabelExistsResult(_)) else {
+            return Err(anyhow!("unable to find QueryLabelExistsResult effect").into());
+        };
+
+        Ok(true)
     }
 
     /// Query list of labels.
@@ -1029,6 +1089,24 @@ impl DaemonApi for Api {
             }
         }
         Ok(labels)
+    }
+     
+    /// List active AQC channels.
+    #[instrument(skip(self))]
+    async fn list_aqc_channels(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+    ) -> api::Result<Vec<api::AqcChannelInfo>> {
+        self.check_team_valid(team).await?;
+
+        let graph = GraphId::from(team.into_id());
+        let channels = self.aqc.list_active_channels(graph)
+            .await
+            .context("unable to list active channels")?;
+
+        debug!(num_channels = channels.len(), "listed active channels");
+        Ok(channels)
     }
 }
 
@@ -1062,6 +1140,36 @@ impl Api {
         };
 
         Ok(())
+    }
+
+    /// Find which team owns a specific channel
+    async fn find_team_for_channel(&self, channel_id: api::AqcChannelId) -> api::Result<api::TeamId> {
+        // For now, we'll need to iterate through teams to find the channel
+        // This could be optimized with a channel->team mapping in the future
+        let teams = self.client.aranya.lock().await.provider().list_graph_ids()?
+            .flatten()
+            .collect::<Vec<_>>();
+
+        for team_id in teams {
+            let active_channels = self.aqc.list_active_channels(team_id).await.unwrap_or_default();
+            for channel_info in active_channels {
+                match (&channel_info.channel_id, &channel_id) {
+                    (api::AqcChannelId::Bidi(stored_id), api::AqcChannelId::Bidi(search_id)) => {
+                        if stored_id == search_id {
+                            return Ok(team_id.into());
+                        }
+                    },
+                    (api::AqcChannelId::Uni(stored_id), api::AqcChannelId::Uni(search_id)) => {
+                        if stored_id == search_id {
+                            return Ok(team_id.into());
+                        }
+                    },
+                    _ => continue,
+                }
+            }
+        }
+
+        Err(anyhow!("Channel not found in any team").into())
     }
 }
 

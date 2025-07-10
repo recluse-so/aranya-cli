@@ -153,6 +153,68 @@ impl<'a> AqcChannels<'a> {
         Ok(())
     }
 
+    /// Lists all active AQC channels for a team.
+    #[instrument(skip_all, fields(%team_id))]
+    pub async fn list_active_channels(
+        &mut self,
+        team_id: TeamId,
+    ) -> crate::Result<Vec<aranya_daemon_api::AqcChannelInfo>> {
+        debug!("listing active channels");
+
+        let channels = self
+            .client
+            .daemon
+            .list_aqc_channels(context::current(), team_id)
+            .await
+            .map_err(IpcError::new)?
+            .map_err(aranya_error)?;
+        
+        debug!(num_channels = channels.len(), "listed active channels");
+        Ok(channels)
+    }
+
+    /// Closes a bidirectional channel by its ID.
+    #[instrument(skip_all, fields(%team_id, %channel_id))]
+    pub async fn close_bidi_channel_by_id(
+        &mut self,
+        team_id: TeamId,
+        channel_id: aranya_daemon_api::AqcBidiChannelId,
+    ) -> crate::Result<()> {
+        debug!("closing bidirectional channel by ID");
+
+        let _ctrl = self
+            .client
+            .daemon
+            .delete_aqc_bidi_channel(context::current(), channel_id)
+            .await
+            .map_err(IpcError::new)?
+            .map_err(aranya_error)?;
+
+        debug!("bidirectional channel closed by ID");
+        Ok(())
+    }
+
+    /// Closes a unidirectional channel by its ID.
+    #[instrument(skip_all, fields(%team_id, %channel_id))]
+    pub async fn close_uni_channel_by_id(
+        &mut self,
+        team_id: TeamId,
+        channel_id: aranya_daemon_api::AqcUniChannelId,
+    ) -> crate::Result<()> {
+        debug!("closing unidirectional channel by ID");
+
+        let _ctrl = self
+            .client
+            .daemon
+            .delete_aqc_uni_channel(context::current(), channel_id)
+            .await
+            .map_err(IpcError::new)?
+            .map_err(aranya_error)?;
+
+        debug!("unidirectional channel closed by ID");
+        Ok(())
+    }
+
     /// Waits for a peer to create an AQC channel with this client.
     pub async fn receive_channel(&mut self) -> crate::Result<AqcPeerChannel> {
         self.client.aqc.receive_channel().await

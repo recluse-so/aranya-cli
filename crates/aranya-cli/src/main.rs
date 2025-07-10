@@ -2,12 +2,13 @@ use anyhow::{Context, Result};
 use aranya_client::{
     Client, QuicSyncConfig, TeamConfig,
 };
-use aranya_daemon_api::{DeviceId, KeyBundle, Role, TeamId, LabelId, NetIdentifier, ChanOp};
+use aranya_daemon_api::{DeviceId, KeyBundle, Role, TeamId, LabelId, NetIdentifier, ChanOp, AqcBidiChannelId, AqcUniChannelId};
 use aranya_util::Addr;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use std::io::{self, Write};
 use bytes::Bytes;
 
 #[derive(Parser)]
@@ -153,6 +154,28 @@ enum Commands {
         /// Timeout in seconds (optional)
         #[arg(long, default_value = "30")]
         timeout_secs: u64,
+    },
+    /// Close a specific AQC channel
+    CloseChannel {
+        /// Team ID
+        team_id: String,
+        /// Channel ID (hex format)
+        channel_id: String,
+        /// Channel type (bidi or uni)
+        channel_type: String,
+    },
+    /// List all active AQC channels
+    ListActiveChannels {
+        /// Team ID
+        team_id: String,
+    },
+    /// Close all AQC channels for a team
+    CloseAllChannels {
+        /// Team ID
+        team_id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
     },
     /// Show active AQC channels and their PSK identities (DEMO ONLY - INSECURE)
     ShowChannels {
@@ -564,28 +587,182 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::ListAqcAssignments { team_id } => {
+        Commands::CloseChannel { team_id, channel_id, channel_type } => {
             let team_id = TeamId::from_str(&team_id)
                 .context("Invalid team ID")?;
             
-            let mut team = client.team(team_id);
-            let devices = team.queries().devices_on_team().await
-                .context("Failed to get devices on team")?;
-            
-            println!("AQC Network Assignments for Team {}", hex::encode(team_id.as_bytes()));
-            println!("┌─────────────────────────────────────────────────┬──────────────────────────────────────┐");
-            println!("│ Device ID                                       │ Network Identifier                  │");
-            println!("├─────────────────────────────────────────────────┼──────────────────────────────────────┤");
-            
-            for device in devices.iter() {
-                let net_id = team.queries().aqc_net_identifier(*device).await
-                    .context("Failed to get AQC network identifier")?;
-                let net_id_str = net_id.map(|n| n.to_string()).unwrap_or_else(|| "None".to_string());
-                println!("│ {:47} │ {:36} │", 
-                    hex::encode(device.as_bytes()), 
-                    net_id_str);
+            match channel_type.to_lowercase().as_str() {
+                "bidi" | "bidirectional" => {
+                    let channel_id = AqcBidiChannelId::from_str(&channel_id)
+                        .context("Invalid bidirectional channel ID")?;
+                    
+                    println!("Closing bidirectional channel {} for team {}", 
+                        hex::encode(channel_id.as_bytes()), 
+                        hex::encode(team_id.as_bytes()));
+                    
+                    match client.aqc().close_bidi_channel_by_id(team_id, channel_id).await {
+                        Ok(()) => {
+                            println!("✅ Bidirectional channel closed successfully");
+                        }
+                        Err(e) => {
+                            println!("⚠️  Channel close failed: {}", e);
+                            println!("🔧 Note: Channel deletion requires completion of daemon TODO items");
+                        }
+                    }
+                }
+                "uni" | "unidirectional" => {
+                    let channel_id = AqcUniChannelId::from_str(&channel_id)
+                        .context("Invalid unidirectional channel ID")?;
+                    
+                    println!("Closing unidirectional channel {} for team {}", 
+                        hex::encode(channel_id.as_bytes()), 
+                        hex::encode(team_id.as_bytes()));
+                    
+                    match client.aqc().close_uni_channel_by_id(team_id, channel_id).await {
+                        Ok(()) => {
+                            println!("✅ Unidirectional channel closed successfully");
+                        }
+                        Err(e) => {
+                            println!("⚠️  Channel close failed: {}", e);
+                            println!("🔧 Note: Channel deletion requires completion of daemon TODO items");
+                        }
+                    }
+                }
+                _ => {
+                    anyhow::bail!("Invalid channel type. Must be 'bidi' or 'uni'");
+                }
             }
-            println!("└─────────────────────────────────────────────────┴──────────────────────────────────────┘");
+        }
+
+        Commands::ListActiveChannels { team_id } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            println!("Active AQC Channels for Team {}", hex::encode(team_id.as_bytes()));
+            
+            match client.aqc().list_active_channels(team_id).await {
+                Ok(channels) => {
+                    if channels.is_empty() {
+                        println!("┌────────────────────────────────────────┬──────────────────┬─────────────────────────────────────┬──────────────────────┐");
+                        println!("│ Channel ID                             │ Type             │ Label ID                            │ Status               │");
+                        println!("├────────────────────────────────────────┼──────────────────┼─────────────────────────────────────┼──────────────────────┤");
+                        println!("│ No active channels found              │                  │                                     │                      │");
+                        println!("└────────────────────────────────────────┴──────────────────┴─────────────────────────────────────┴──────────────────────┘");
+                    } else {
+                        println!("┌────────────────────────────────────────┬──────────────────┬─────────────────────────────────────┬──────────────────────┐");
+                        println!("│ Channel ID                             │ Type             │ Label ID                            │ Status               │");
+                        println!("├────────────────────────────────────────┼──────────────────┼─────────────────────────────────────┼──────────────────────┤");
+                        
+                        for channel in channels {
+                            let channel_id_str = match &channel.channel_id {
+                                aranya_daemon_api::AqcChannelId::Bidi(id) => hex::encode(id.as_bytes()),
+                                aranya_daemon_api::AqcChannelId::Uni(id) => hex::encode(id.as_bytes()),
+                            };
+                            let type_str = match channel.channel_type {
+                                aranya_daemon_api::AqcChannelType::Bidirectional => "Bidirectional",
+                                aranya_daemon_api::AqcChannelType::Unidirectional => "Unidirectional",
+                            };
+                            let status_str = match channel.status {
+                                aranya_daemon_api::AqcChannelStatus::Active => "Active",
+                                aranya_daemon_api::AqcChannelStatus::Connecting => "Connecting",
+                                aranya_daemon_api::AqcChannelStatus::Closing => "Closing",
+                                aranya_daemon_api::AqcChannelStatus::Closed => "Closed",
+                            };
+                            
+                            println!("│ {:38} │ {:16} │ {:35} │ {:20} │", 
+                                if channel_id_str.len() > 38 { &channel_id_str[..38] } else { &channel_id_str },
+                                type_str,
+                                hex::encode(channel.label_id.as_bytes())[..35.min(hex::encode(channel.label_id.as_bytes()).len())].to_string(),
+                                status_str);
+                        }
+                        println!("└────────────────────────────────────────┴──────────────────┴─────────────────────────────────────┴──────────────────────┘");
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️  Failed to list channels: {}", e);
+                    println!("┌────────────────────────────────────────┬──────────────────┬─────────────────────────────────────┬──────────────────────┐");
+                    println!("│ Channel ID                             │ Type             │ Label ID                            │ Status               │");
+                    println!("├────────────────────────────────────────┼──────────────────┼─────────────────────────────────────┼──────────────────────┤");
+                    println!("│ (Channel tracking not yet implemented)│                  │                                     │                      │");
+                    println!("└────────────────────────────────────────┴──────────────────┴─────────────────────────────────────┴──────────────────────┘");
+                }
+            }
+            
+            println!("\n💡 Channel Management:");
+            println!("   • Use 'aranya close-channel <team-id> <channel-id> <type>' to close specific channels");
+            println!("   • Use 'aranya close-all-channels <team-id>' to close all channels for a team");
+            println!("   • Channel tracking requires daemon-side state management implementation");
+        }
+
+        Commands::CloseAllChannels { team_id, force } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            if !force {
+                print!("⚠️  This will close ALL active AQC channels for team {}. Are you sure? (y/N): ", 
+                    hex::encode(team_id.as_bytes())[..8].to_string());
+                io::stdout().flush()?;
+                
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                
+                if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+                    println!("Operation cancelled.");
+                    return Ok(());
+                }
+            }
+            
+            println!("Closing all AQC channels for team {}", hex::encode(team_id.as_bytes()));
+            
+            match client.aqc().list_active_channels(team_id).await {
+                Ok(channels) => {
+                    if channels.is_empty() {
+                        println!("No active channels found for this team.");
+                        return Ok(());
+                    }
+                    
+                    let mut closed_count = 0;
+                    let mut failed_count = 0;
+                    
+                    for channel in channels {
+                        let channel_id_str = match &channel.channel_id {
+                            aranya_daemon_api::AqcChannelId::Bidi(id) => hex::encode(id.as_bytes()),
+                            aranya_daemon_api::AqcChannelId::Uni(id) => hex::encode(id.as_bytes()),
+                        };
+                        
+                        let result = match channel.channel_id {
+                            aranya_daemon_api::AqcChannelId::Bidi(id) => {
+                                client.aqc().close_bidi_channel_by_id(team_id, id).await
+                            }
+                            aranya_daemon_api::AqcChannelId::Uni(id) => {
+                                client.aqc().close_uni_channel_by_id(team_id, id).await
+                            }
+                        };
+                        
+                        match result {
+                            Ok(()) => {
+                                println!("  ✓ Closed channel {}", &channel_id_str[..8]);
+                                closed_count += 1;
+                            }
+                            Err(e) => {
+                                println!("  ✗ Failed to close channel {}: {}", &channel_id_str[..8], e);
+                                failed_count += 1;
+                            }
+                        }
+                    }
+                    
+                    if failed_count == 0 {
+                        println!("✅ Successfully closed {} channels", closed_count);
+                    } else {
+                        println!("⚠️  Closed {} channels, {} failures", closed_count, failed_count);
+                        println!("🔧 Note: Channel deletion requires completion of daemon TODO items");
+                    }
+                }
+                Err(e) => {
+                    println!("❌ Failed to list channels: {}", e);
+                    println!("🔧 Note: Channel tracking requires daemon-side implementation");
+                }
+            }
         }
 
         Commands::ShowChannels { team_id } => {
@@ -696,6 +873,30 @@ async fn main() -> Result<()> {
                 println!("│ {:47} │ {:36} │", 
                     hex::encode(device.as_bytes()), 
                     label_str);
+            }
+            println!("└─────────────────────────────────────────────────┴──────────────────────────────────────┘");
+        }
+
+        Commands::ListAqcAssignments { team_id } => {
+            let team_id = TeamId::from_str(&team_id)
+                .context("Invalid team ID")?;
+            
+            let mut team = client.team(team_id);
+            let devices = team.queries().devices_on_team().await
+                .context("Failed to get devices on team")?;
+            
+            println!("AQC Network Assignments for Team {}", hex::encode(team_id.as_bytes()));
+            println!("┌─────────────────────────────────────────────────┬──────────────────────────────────────┐");
+            println!("│ Device ID                                       │ Network Identifier                  │");
+            println!("├─────────────────────────────────────────────────┼──────────────────────────────────────┤");
+            
+            for device in devices.iter() {
+                let net_id = team.queries().aqc_net_identifier(*device).await
+                    .context("Failed to get AQC network identifier")?;
+                let net_id_str = net_id.map(|n| n.to_string()).unwrap_or_else(|| "None".to_string());
+                println!("│ {:47} │ {:36} │", 
+                    hex::encode(device.as_bytes()), 
+                    net_id_str);
             }
             println!("└─────────────────────────────────────────────────┴──────────────────────────────────────┘");
         }

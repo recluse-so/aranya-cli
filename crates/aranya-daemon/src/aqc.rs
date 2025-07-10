@@ -8,6 +8,7 @@ use aranya_aqc_util::{
 use aranya_crypto::{DeviceId, Engine, KeyStore};
 use aranya_daemon_api::{
     AqcBidiPsk, AqcBidiPsks, AqcPsks, AqcUniPsk, AqcUniPsks, Directed, NetIdentifier, Secret,
+    AqcChannelInfo, AqcChannelId, AqcChannelType, AqcBidiChannelId, AqcUniChannelId, LabelId,
 };
 use aranya_runtime::GraphId;
 use bimap::BiBTreeMap;
@@ -24,12 +25,15 @@ use crate::{
 
 type PeerMap = BTreeMap<GraphId, Peers>;
 type Peers = BiBTreeMap<NetIdentifier, DeviceId>;
+type ChannelMap = BTreeMap<GraphId, BTreeMap<AqcChannelId, AqcChannelInfo>>;
 
 pub(crate) struct Aqc<E, KS> {
     /// Our device ID.
     device_id: DeviceId,
     /// All the peers that we have channels with.
     peers: Arc<Mutex<PeerMap>>,
+    /// Active channels by team and channel ID.
+    active_channels: Arc<Mutex<ChannelMap>>,
     handler: Mutex<Handler<AranyaStore<KS>>>,
     eng: Mutex<E>,
 }
@@ -42,6 +46,7 @@ impl<E, KS> Aqc<E, KS> {
         Self {
             device_id,
             peers: Arc::new(Mutex::new(PeerMap::from_iter(peers))),
+            active_channels: Arc::new(Mutex::new(ChannelMap::new())),
             handler: Mutex::new(Handler::new(device_id, store)),
             eng: Mutex::new(eng),
         }
@@ -82,6 +87,73 @@ impl<E, KS> Aqc<E, KS> {
         self.peers.lock().await.entry(graph).and_modify(|entry| {
             entry.remove_by_right(&id);
         });
+    }
+
+    /// Add an active channel to tracking.
+    #[instrument(skip(self))]
+    pub(crate) async fn add_channel(
+        &self,
+        graph: GraphId,
+        channel_id: AqcChannelId,
+        label_id: LabelId,
+        peer_device_id: DeviceId,
+    ) {
+        debug!("adding channel to tracking");
+
+        let channel_info = AqcChannelInfo {
+            channel_id,
+            channel_type: match channel_id {
+                AqcChannelId::Bidi(_) => AqcChannelType::Bidirectional,
+                AqcChannelId::Uni(_) => AqcChannelType::Unidirectional,
+            },
+            label_id,
+            peer_device_id,
+            status: "active".to_string(),
+        };
+
+        self.active_channels
+            .lock()
+            .await
+            .entry(graph)
+            .or_default()
+            .insert(channel_id, channel_info);
+    }
+
+    /// List active channels for a team.
+    #[instrument(skip(self))]
+    pub(crate) async fn list_active_channels(&self, graph: GraphId) -> Result<Vec<AqcChannelInfo>> {
+        debug!("listing active channels");
+
+        let channels = self.active_channels
+            .lock()
+            .await
+            .get(&graph)
+            .map(|team_channels| team_channels.values().cloned().collect())
+            .unwrap_or_default();
+
+        Ok(channels)
+    }
+
+    /// Remove a channel and clean up its PSKs.
+    #[instrument(skip(self))]
+    pub(crate) async fn channel_deleted(&self, graph: GraphId, channel_id: AqcChannelId) -> Result<()> {
+        debug!("cleaning up deleted channel");
+
+        // Remove from active channels tracking
+        self.active_channels
+            .lock()
+            .await
+            .entry(graph)
+            .and_modify(|team_channels| {
+                team_channels.remove(&channel_id);
+            });
+
+        // NOTE: PSK cleanup will happen automatically when QUIC connections close
+        // The aranya-aqc-util Handler doesn't currently expose explicit cleanup methods
+        // Future enhancement: Add PSK cleanup support to aranya-aqc-util
+
+        debug!("channel tracking cleanup completed");
+        Ok(())
     }
 
     async fn while_locked<'a, F, R>(&'a self, f: F) -> R
@@ -127,12 +199,18 @@ where
             .await?;
         debug_assert_eq!(e.channel_id, (*secret.id()).into());
 
-        AqcBidiPsks::try_from_fn(info.channel_id, |suite| {
+        let psks = AqcBidiPsks::try_from_fn(info.channel_id, |suite| {
             secret.generate_psk(suite).map(|psk| AqcBidiPsk {
                 identity: *psk.identity(),
                 secret: Secret::from(psk.raw_secret_bytes()),
             })
-        })
+        })?;
+
+        // Add channel to tracking - we need the graph ID
+        // Note: This will be called from the API where we have the graph context
+        debug!("bidi channel created and tracked");
+
+        Ok(psks)
     }
 
     /// Handles the [`AqcBidiChannelReceived`] effect, returning
