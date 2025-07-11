@@ -293,8 +293,31 @@ async fn main() -> Result<()> {
     // Export team ID for CLI testing
     println!("export TEAM_ID={}", team_id);
     
-    // Update the env file with team ID
-    let env_content = format!("{}\nexport SEED_IKM_HEX={}\nexport TEAM_ID={}", env_vars, seed_ikm_hex, team_id);
+    // Export device IDs for CLI testing
+    println!("export OWNER_DEVICE_ID={}", owner.id);
+    println!("export ADMIN_DEVICE_ID={}", admin.id);
+    println!("export OPERATOR_DEVICE_ID={}", operator.id);
+    println!("export MEMBERA_DEVICE_ID={}", membera.id);
+    println!("export MEMBERB_DEVICE_ID={}", memberb.id);
+    
+    // Export sync addresses for CLI testing
+    println!("export OWNER_SYNC_ADDR={}", owner_addr);
+    println!("export ADMIN_SYNC_ADDR={}", admin_addr);
+    println!("export OPERATOR_SYNC_ADDR={}", operator_addr);
+    println!("export MEMBERA_SYNC_ADDR={}", membera_addr);
+    println!("export MEMBERB_SYNC_ADDR={}", memberb_addr);
+    
+    // Export AQC network IDs for CLI testing
+    println!("export MEMBERA_AQC_NET_ID={}", membera.aqc_net_id());
+    println!("export MEMBERB_AQC_NET_ID={}", memberb.aqc_net_id());
+    
+    // Update the env file with all new variables
+    let env_content = format!(
+        "{}\nexport SEED_IKM_HEX={}\nexport TEAM_ID={}\nexport OWNER_DEVICE_ID={}\nexport ADMIN_DEVICE_ID={}\nexport OPERATOR_DEVICE_ID={}\nexport MEMBERA_DEVICE_ID={}\nexport MEMBERB_DEVICE_ID={}\nexport OWNER_SYNC_ADDR={}\nexport ADMIN_SYNC_ADDR={}\nexport OPERATOR_SYNC_ADDR={}\nexport MEMBERA_SYNC_ADDR={}\nexport MEMBERB_SYNC_ADDR={}\nexport MEMBERA_AQC_NET_ID={}\nexport MEMBERB_AQC_NET_ID={}",
+        env_vars, seed_ikm_hex, team_id, owner.id, admin.id, operator.id, membera.id, memberb.id, 
+        owner_addr, admin_addr, operator_addr, membera_addr, memberb_addr, 
+        membera.aqc_net_id(), memberb.aqc_net_id()
+    );
     fs::write(&env_file, env_content).await?;
 
     let mut admin_team = admin.client.add_team(team_id, cfg.clone()).await?;
@@ -449,6 +472,19 @@ async fn main() -> Result<()> {
     info!("demo aqc functionality");
     info!("creating aqc label");
     let label3 = operator_team.create_label(text!("label3")).await?;
+    
+    // Export label ID for CLI testing
+    println!("export LABEL_ID={}", label3);
+    
+    // Update env file with label ID
+    let env_content = format!(
+        "{}\nexport SEED_IKM_HEX={}\nexport TEAM_ID={}\nexport OWNER_DEVICE_ID={}\nexport ADMIN_DEVICE_ID={}\nexport OPERATOR_DEVICE_ID={}\nexport MEMBERA_DEVICE_ID={}\nexport MEMBERB_DEVICE_ID={}\nexport OWNER_SYNC_ADDR={}\nexport ADMIN_SYNC_ADDR={}\nexport OPERATOR_SYNC_ADDR={}\nexport MEMBERA_SYNC_ADDR={}\nexport MEMBERB_SYNC_ADDR={}\nexport MEMBERA_AQC_NET_ID={}\nexport MEMBERB_AQC_NET_ID={}\nexport LABEL_ID={}",
+        env_vars, seed_ikm_hex, team_id, owner.id, admin.id, operator.id, membera.id, memberb.id, 
+        owner_addr, admin_addr, operator_addr, membera_addr, memberb_addr, 
+        membera.aqc_net_id(), memberb.aqc_net_id(), label3
+    );
+    fs::write(&env_file, env_content).await?;
+    
     let op = ChanOp::SendRecv;
     info!("assigning label to membera");
     operator_team.assign_label(membera.id, label3, op).await?;
