@@ -361,6 +361,12 @@ enum Commands {
     GetKeyBundle,
     /// Get device's ID
     GetDeviceId,
+    /// Get client/device identity info from daemon
+    CreateClient {
+        /// Output format (json, text)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Create team with custom configuration
     CreateTeamWithConfig {
         /// Seed IKM in hex (32 bytes)
@@ -1062,6 +1068,41 @@ async fn main() -> Result<()> {
         Commands::GetDeviceId => {
             let device_id = client.get_device_id().await?;
             println!("Device ID: {}", device_id);
+        }
+        Commands::CreateClient { format } => {
+            // Get device info from the connected daemon
+            let device_id = client.get_device_id().await?;
+            let key_bundle = client.get_key_bundle().await?;
+
+            match format.as_str() {
+                "json" => {
+                    let output = serde_json::json!({
+                        "device_id": device_id.to_string(),
+                        "identity_key": hex::encode(&key_bundle.identity),
+                        "signing_key": hex::encode(&key_bundle.signing),
+                        "encoding_key": hex::encode(&key_bundle.encoding),
+                        "key_bundle": {
+                            "identity": hex::encode(&key_bundle.identity),
+                            "signing": hex::encode(&key_bundle.signing),
+                            "encoding": hex::encode(&key_bundle.encoding)
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                "text" => {
+                    println!("Client Info from Daemon:");
+                    println!("Device ID: {}", device_id);
+                    println!("Identity Key: {}", hex::encode(&key_bundle.identity));
+                    println!("Signing Key: {}", hex::encode(&key_bundle.signing));
+                    println!("Encoding Key: {}", hex::encode(&key_bundle.encoding));
+                    println!();
+                    println!("Key Bundle (for adding to teams):");
+                    println!("Identity: {}", hex::encode(&key_bundle.identity));
+                    println!("Signing: {}", hex::encode(&key_bundle.signing));
+                    println!("Encoding: {}", hex::encode(&key_bundle.encoding));
+                }
+                _ => anyhow::bail!("Invalid format: {}. Use 'json' or 'text'", format),
+            }
         }
         Commands::CreateTeamWithConfig { seed_ikm, sync_interval_secs } => {
             let ikm = hex::decode(&seed_ikm).context("Invalid hex for seed IKM")?;

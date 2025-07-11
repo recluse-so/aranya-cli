@@ -14,7 +14,6 @@ use aranya_util::Addr;
 use backon::{ExponentialBuilder, Retryable};
 use buggy::BugExt;
 use bytes::Bytes;
-use tempfile::TempDir;
 use tokio::{
     fs,
     process::{Child, Command},
@@ -44,8 +43,7 @@ impl Daemon {
 
         let cfg_path = cfg_path.as_os_str().to_str().context("should be UTF-8")?;
         let mut cmd = Command::new(&path.0);
-        cmd.kill_on_drop(true)
-            .current_dir(work_dir)
+        cmd.current_dir(work_dir)
             .args(["--config", cfg_path]);
         debug!(?cmd, "spawning daemon");
         let proc = cmd.spawn().context("unable to spawn daemon")?;
@@ -62,8 +60,7 @@ struct ClientCtx {
     aqc_addr: SocketAddr,
     pk: KeyBundle,
     id: DeviceId,
-    // NB: These have important drop side effects.
-    _work_dir: TempDir,
+    _work_dir: PathBuf,
     _daemon: Daemon,
 }
 
@@ -71,10 +68,11 @@ impl ClientCtx {
     pub async fn new(team_name: &str, user_name: &str, daemon_path: &DaemonPath) -> Result<Self> {
         info!(team_name, user_name, "creating `ClientCtx`");
 
-        let work_dir = TempDir::with_prefix(user_name)?;
+        let work_dir = PathBuf::from(format!("/tmp/aranya-{}-{}", user_name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()));
+        fs::create_dir_all(&work_dir).await?;
 
         let daemon = {
-            let work_dir = work_dir.path().join("daemon");
+            let work_dir = work_dir.join("daemon");
             fs::create_dir_all(&work_dir).await?;
 
             let cfg_path = work_dir.join("config.json");
@@ -108,7 +106,7 @@ impl ClientCtx {
         };
 
         // The path that the daemon will listen on.
-        let uds_sock = work_dir.path().join("daemon").join("run").join("uds.sock");
+        let uds_sock = work_dir.join("daemon").join("run").join("uds.sock");
 
         // Give the daemon time to start up and write its public key.
         sleep(Duration::from_millis(100)).await;
@@ -170,6 +168,19 @@ impl<S> Filter<S> for DemoFilter {
     }
 }
 
+async fn print_state_dir(label: &str, path: &Path) {
+    println!("\n===== DEBUG: {}: Listing {} =====", label, path.display());
+    match fs::read_dir(path).await {
+        Ok(mut entries) => {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                println!("  - {}", entry.path().display());
+            }
+        }
+        Err(e) => println!("  (error reading dir: {})", e),
+    }
+    println!("===== END DEBUG: {} =====\n", label);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let filter = DemoFilter {
@@ -207,12 +218,51 @@ async fn main() -> Result<()> {
     let mut membera = ClientCtx::new(team_name, "member_a", &daemon_path).await?;
     let mut memberb = ClientCtx::new(team_name, "member_b", &daemon_path).await?;
 
+    // Debug: Print state directories after all daemons are started
+    print_state_dir("Owner state dir after daemon start", &owner._work_dir.join("daemon").join("state")).await;
+    print_state_dir("Admin state dir after daemon start", &admin._work_dir.join("daemon").join("state")).await;
+    print_state_dir("Operator state dir after daemon start", &operator._work_dir.join("daemon").join("state")).await;
+    print_state_dir("MemberA state dir after daemon start", &membera._work_dir.join("daemon").join("state")).await;
+    print_state_dir("MemberB state dir after daemon start", &memberb._work_dir.join("daemon").join("state")).await;
+
+    // Print all UDS socket paths for all daemons
+    info!("=== UDS Socket Paths for All Daemons ===");
+    info!("Owner UDS: {}", owner._work_dir.join("daemon").join("run").join("uds.sock").display());
+    info!("Admin UDS: {}", admin._work_dir.join("daemon").join("run").join("uds.sock").display());
+    info!("Operator UDS: {}", operator._work_dir.join("daemon").join("run").join("uds.sock").display());
+    info!("MemberA UDS: {}", membera._work_dir.join("daemon").join("run").join("uds.sock").display());
+    info!("MemberB UDS: {}", memberb._work_dir.join("daemon").join("run").join("uds.sock").display());
+    info!("=========================================");
+    
+    // Export UDS paths as environment variables for CLI testing
+    let env_vars = format!(
+        "export OWNER_UDS={}\nexport ADMIN_UDS={}\nexport OPERATOR_UDS={}\nexport MEMBERA_UDS={}\nexport MEMBERB_UDS={}",
+        owner._work_dir.join("daemon").join("run").join("uds.sock").display(),
+        admin._work_dir.join("daemon").join("run").join("uds.sock").display(),
+        operator._work_dir.join("daemon").join("run").join("uds.sock").display(),
+        membera._work_dir.join("daemon").join("run").join("uds.sock").display(),
+        memberb._work_dir.join("daemon").join("run").join("uds.sock").display()
+    );
+    println!("{}", env_vars);
+
     // Create the team config
     let seed_ikm = {
         let mut buf = [0; 32];
         owner.client.rand(&mut buf).await;
         buf
     };
+    
+    // Export seed-ikm-hex for CLI testing
+    let seed_ikm_hex = seed_ikm.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    println!("export SEED_IKM_HEX={}", seed_ikm_hex);
+    
+    // Write environment variables to a file for easy sourcing
+    let env_file = PathBuf::from("/tmp/aranya-env-vars.sh");
+    let env_content = format!("{}\nexport SEED_IKM_HEX={}", env_vars, seed_ikm_hex);
+    fs::write(&env_file, env_content).await?;
+    println!("Environment variables written to: {}", env_file.display());
+    println!("To load them, run: source {}", env_file.display());
+    
     let cfg = {
         let qs_cfg = QuicSyncConfig::builder().seed_ikm(seed_ikm).build()?;
         TeamConfig::builder().quic_sync(qs_cfg).build()?
@@ -238,11 +288,23 @@ async fn main() -> Result<()> {
         .context("expected to create team")?;
     let team_id = owner_team.team_id();
     info!(%team_id);
+    print_state_dir("Owner state dir after team creation", &owner._work_dir.join("daemon").join("state")).await;
+    
+    // Export team ID for CLI testing
+    println!("export TEAM_ID={}", team_id);
+    
+    // Update the env file with team ID
+    let env_content = format!("{}\nexport SEED_IKM_HEX={}\nexport TEAM_ID={}", env_vars, seed_ikm_hex, team_id);
+    fs::write(&env_file, env_content).await?;
 
     let mut admin_team = admin.client.add_team(team_id, cfg.clone()).await?;
+    print_state_dir("Admin state dir after add_team", &admin._work_dir.join("daemon").join("state")).await;
     let mut operator_team = operator.client.add_team(team_id, cfg.clone()).await?;
+    print_state_dir("Operator state dir after add_team", &operator._work_dir.join("daemon").join("state")).await;
     let mut membera_team = membera.client.add_team(team_id, cfg.clone()).await?;
+    print_state_dir("MemberA state dir after add_team", &membera._work_dir.join("daemon").join("state")).await;
     let mut memberb_team = memberb.client.add_team(team_id, cfg.clone()).await?;
+    print_state_dir("MemberB state dir after add_team", &memberb._work_dir.join("daemon").join("state")).await;
 
     // setup sync peers.
     info!("adding admin to team");
@@ -331,6 +393,13 @@ async fn main() -> Result<()> {
 
     // wait for syncing.
     sleep(sleep_interval).await;
+
+    // Debug: Print state directories after sync
+    print_state_dir("Owner state dir after sync", &owner._work_dir.join("daemon").join("state")).await;
+    print_state_dir("Admin state dir after sync", &admin._work_dir.join("daemon").join("state")).await;
+    print_state_dir("Operator state dir after sync", &operator._work_dir.join("daemon").join("state")).await;
+    print_state_dir("MemberA state dir after sync", &membera._work_dir.join("daemon").join("state")).await;
+    print_state_dir("MemberB state dir after sync", &memberb._work_dir.join("daemon").join("state")).await;
 
     // add membera to team.
     info!("adding membera to team");
