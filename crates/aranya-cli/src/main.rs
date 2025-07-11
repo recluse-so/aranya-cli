@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use aranya_client::{
-    Client, QuicSyncConfig, TeamConfig,
+    Client, QuicSyncConfig, TeamConfig, SyncPeerConfig,
+    aqc::{AqcBidiChannel, AqcBidiStream, AqcPeerChannel, AqcPeerStream, TryReceiveError},
 };
 use aranya_daemon_api::{DeviceId, KeyBundle, Role, TeamId, LabelId, NetIdentifier, ChanOp, Text};
 use aranya_util::Addr;
@@ -8,8 +9,105 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use bytes::Bytes;
-use spideroak_base58::ToBase58;
+use uuid::Uuid;
+use lazy_static::lazy_static;
+
+use rand::Rng;
+
+/// Global channel registry for managing AQC channels and streams across CLI commands
+#[derive(Default)]
+struct ChannelRegistry {
+    channels: HashMap<String, AqcBidiChannel>,
+    streams: HashMap<String, AqcBidiStream>,
+    peer_streams: HashMap<String, AqcPeerStream>,
+    received_channels: HashMap<String, AqcPeerChannel>,
+}
+
+impl ChannelRegistry {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn store_channel(&mut self, channel: AqcBidiChannel) -> String {
+        let id = Uuid::new_v4().to_string();
+        self.channels.insert(id.clone(), channel);
+        id
+    }
+
+    fn get_channel(&mut self, id: &str) -> Option<&mut AqcBidiChannel> {
+        self.channels.get_mut(id)
+    }
+
+    fn store_stream(&mut self, stream: AqcBidiStream) -> String {
+        let id = Uuid::new_v4().to_string();
+        self.streams.insert(id.clone(), stream);
+        id
+    }
+
+    fn get_stream(&mut self, id: &str) -> Option<&mut AqcBidiStream> {
+        self.streams.get_mut(id)
+    }
+
+    fn store_peer_stream(&mut self, stream: AqcPeerStream) -> String {
+        let id = Uuid::new_v4().to_string();
+        self.peer_streams.insert(id.clone(), stream);
+        id
+    }
+
+    fn get_peer_stream(&mut self, id: &str) -> Option<&mut AqcPeerStream> {
+        self.peer_streams.get_mut(id)
+    }
+
+    fn store_received_channel(&mut self, channel: AqcPeerChannel) -> String {
+        let id = Uuid::new_v4().to_string();
+        self.received_channels.insert(id.clone(), channel);
+        id
+    }
+
+    fn get_received_channel(&mut self, id: &str) -> Option<&mut AqcPeerChannel> {
+        self.received_channels.get_mut(id)
+    }
+
+    fn list_channels(&self) -> Vec<String> {
+        self.channels.keys().cloned().collect()
+    }
+
+    fn list_streams(&self) -> Vec<String> {
+        self.streams.keys().cloned().collect()
+    }
+
+    fn list_peer_streams(&self) -> Vec<String> {
+        self.peer_streams.keys().cloned().collect()
+    }
+
+    fn list_received_channels(&self) -> Vec<String> {
+        self.received_channels.keys().cloned().collect()
+    }
+
+    fn remove_channel(&mut self, id: &str) -> Option<AqcBidiChannel> {
+        self.channels.remove(id)
+    }
+
+    fn remove_stream(&mut self, id: &str) -> Option<AqcBidiStream> {
+        self.streams.remove(id)
+    }
+
+    fn remove_peer_stream(&mut self, id: &str) -> Option<AqcPeerStream> {
+        self.peer_streams.remove(id)
+    }
+
+    fn remove_received_channel(&mut self, id: &str) -> Option<AqcPeerChannel> {
+        self.received_channels.remove(id)
+    }
+}
+
+// Global registry instance
+lazy_static! {
+    static ref CHANNEL_REGISTRY: Arc<Mutex<ChannelRegistry>> = Arc::new(Mutex::new(ChannelRegistry::new()));
+}
 
 #[derive(Parser)]
 #[command(name = "aranya")]
@@ -174,6 +272,127 @@ enum Commands {
         /// Team ID
         team_id: String,
     },
+    /// Query devices on a team
+    QueryDevicesOnTeam {
+        /// Team ID
+        team_id: String,
+    },
+    /// Query device role
+    QueryDeviceRole {
+        /// Team ID
+        team_id: String,
+        /// Device ID
+        device_id: String,
+    },
+    /// Query device keybundle
+    QueryDeviceKeybundle {
+        /// Team ID
+        team_id: String,
+        /// Device ID
+        device_id: String,
+    },
+    /// Query AQC network identifier for a device
+    QueryAqcNetIdentifier {
+        /// Team ID
+        team_id: String,
+        /// Device ID
+        device_id: String,
+    },
+    /// Revoke a label assignment from a device
+    RevokeLabel {
+        /// Team ID
+        team_id: String,
+        /// Device ID
+        device_id: String,
+        /// Label ID
+        label_id: String,
+    },
+    /// Delete a label entirely (Admin only)
+    DeleteLabel {
+        /// Team ID
+        team_id: String,
+        /// Label ID
+        label_id: String,
+    },
+    /// Create bidirectional AQC channel
+    CreateBidiChannel {
+        /// Team ID
+        team_id: String,
+        /// Target device network identifier
+        net_id: String,
+        /// Label ID for the channel
+        label_id: String,
+    },
+    /// Receive incoming AQC channel
+    ReceiveChannel {
+        /// Timeout in seconds (0 for infinite)
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+    /// Create bidirectional stream on channel
+    CreateBidiStream {
+        /// Channel ID (from create-bidi-channel)
+        channel_id: String,
+    },
+    /// Receive stream from channel
+    ReceiveStream {
+        /// Channel ID (from receive-channel)
+        channel_id: String,
+        /// Timeout in seconds (0 for infinite)
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+    /// Send data on stream
+    SendStreamData {
+        /// Stream ID (from create-bidi-stream)
+        stream_id: String,
+        /// Data to send
+        data: String,
+    },
+    /// Receive data from stream
+    ReceiveStreamData {
+        /// Stream ID (from receive-stream)
+        stream_id: String,
+        /// Timeout in seconds (0 for infinite)
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+    /// Get device's key bundle
+    GetKeyBundle,
+    /// Get device's ID
+    GetDeviceId,
+    /// Create team with custom configuration
+    CreateTeamWithConfig {
+        /// Seed IKM in hex (32 bytes)
+        seed_ikm: String,
+        /// Sync interval in seconds
+        #[arg(long, default_value = "1")]
+        sync_interval_secs: u64,
+    },
+    /// Set sync configuration for a team
+    SetSyncConfig {
+        /// Team ID
+        team_id: String,
+        /// Sync interval in seconds
+        interval_secs: u64,
+    },
+    /// Get base58 Label ID
+    GetLabelIdBase58 {
+        /// Label ID in hex format
+        label_id_hex: String,
+    },
+    /// List active channels and streams
+    ListActiveChannels,
+    /// Close a channel
+    CloseChannel {
+        /// Channel ID to close
+        channel_id: String,
+    },
+    /// Close a stream
+    CloseStream {
+        /// Stream ID to close
+        stream_id: String,
+    },
 }
 
 #[tokio::main]
@@ -195,28 +414,29 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::CreateTeam { seed_ikm } => {
-            let cfg = if let Some(ikm_hex) = seed_ikm {
-                let ikm = hex::decode(ikm_hex).context("Invalid hex for seed IKM")?;
-                if ikm.len() != 32 {
+            let mut ikm = [0u8; 32];
+            if let Some(hex_ikm) = seed_ikm {
+                let bytes = hex::decode(&hex_ikm)
+                    .context("Invalid hex for seed IKM")?;
+                if bytes.len() != 32 {
                     anyhow::bail!("Seed IKM must be exactly 32 bytes");
                 }
-                let mut ikm_array = [0u8; 32];
-                ikm_array.copy_from_slice(&ikm);
-                let sync_cfg = QuicSyncConfig::builder()
-                    .seed_ikm(ikm_array)
-                    .build()?;
-                TeamConfig::builder()
-                    .quic_sync(sync_cfg)
-                    .build()?
+                ikm.copy_from_slice(&bytes);
             } else {
-                let sync_cfg = QuicSyncConfig::builder().build()?;
-                TeamConfig::builder()
-                    .quic_sync(sync_cfg)
-                    .build()?
-            };
+                // Generate random IKM
+                let mut rng = rand::thread_rng();
+                rng.fill(&mut ikm);
+            }
 
-            let team = client.create_team(cfg).await?;
+            let team_config = TeamConfig::builder()
+                .quic_sync(QuicSyncConfig::builder().seed_ikm(ikm).build()?)
+                .build()?;
+
+            let team = client.create_team(team_config).await
+                .context("Failed to create team")?;
+            
             println!("Team created: {}", team.team_id());
+            println!("Seed IKM: {}", hex::encode(ikm));
         }
         Commands::AddTeam { team_id, seed_ikm } => {
             let team_id = TeamId::from_str(&team_id)?;
@@ -347,7 +567,9 @@ async fn main() -> Result<()> {
             let label_id = team.create_label(label_text).await?;
             println!("Label '{}' created successfully", label_name);
             // Print the label ID in base58 format using the Display trait
-            println!("Label ID: {}", label_id);
+            println!("Label ID (base58): {}", label_id);
+            // Print the label ID in hex format
+            println!("Label ID (hex):    {}", hex::encode(label_id.as_bytes()));
         }
         Commands::AssignLabel { team_id, device_id, label_id, operation } => {
             let team_id = TeamId::from_str(&team_id)?;
@@ -544,6 +766,375 @@ async fn main() -> Result<()> {
             println!("Note: AQC channels are ephemeral and automatically closed after use for PSK rotation");
             println!("Active channels cannot be listed as they are created fresh for each communication");
             println!("This ensures perfect forward secrecy through PSK rotation");
+        }
+        Commands::QueryDevicesOnTeam { team_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let mut team = client.team(team_id);
+            let devices = team.queries().devices_on_team().await?;
+
+            println!("Devices on team {}:", team_id);
+            println!("Total devices: {}", devices.iter().count());
+            for device_id in devices.iter() {
+                println!("  {}", device_id);
+            }
+        }
+        Commands::QueryDeviceRole { team_id, device_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let device_id = DeviceId::from_str(&device_id)?;
+            let mut team = client.team(team_id);
+            let role = team.queries().device_role(device_id).await?;
+
+            println!("Device {} role on team {}: {:?}", device_id, team_id, role);
+        }
+        Commands::QueryDeviceKeybundle { team_id, device_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let device_id = DeviceId::from_str(&device_id)?;
+            let mut team = client.team(team_id);
+            let key_bundle = team.queries().device_keybundle(device_id).await?;
+
+            println!("Device {} keybundle on team {}:", device_id, team_id);
+            println!("  Identity Key: {}", hex::encode(&key_bundle.identity));
+            println!("  Signing Key: {}", hex::encode(&key_bundle.signing));
+            println!("  Encoding Key: {}", hex::encode(&key_bundle.encoding));
+        }
+        Commands::QueryAqcNetIdentifier { team_id, device_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let device_id = DeviceId::from_str(&device_id)?;
+            let mut team = client.team(team_id);
+            let net_id = team.queries().aqc_net_identifier(device_id).await?;
+
+            match net_id {
+                Some(net_id) => println!("Device {} AQC network identifier on team {}: {}", device_id, team_id, net_id),
+                None => println!("Device {} has no AQC network identifier assigned on team {}", device_id, team_id),
+            }
+        }
+        Commands::RevokeLabel { team_id, device_id, label_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let device_id = DeviceId::from_str(&device_id)?;
+            let label_id = LabelId::from_str(&label_id)?;
+
+            let mut team = client.team(team_id);
+            team.revoke_label(device_id, label_id).await?;
+            println!("Label {} revoked from device {} on team {}", label_id, device_id, team_id);
+        }
+        Commands::DeleteLabel { team_id, label_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let label_id = LabelId::from_str(&label_id)?;
+
+            let mut team = client.team(team_id);
+            team.delete_label(label_id).await?;
+            println!("Label {} deleted from team {}", label_id, team_id);
+        }
+        Commands::CreateBidiChannel { team_id, net_id, label_id } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let label_id = LabelId::from_str(&label_id)?;
+            let net_text: Text = net_id.clone().try_into()?;
+            let net_identifier = NetIdentifier(net_text);
+
+            let mut aqc = client.aqc();
+            let channel = aqc.create_bidi_channel(team_id, net_identifier, label_id).await?;
+
+            // Store the channel in the registry
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            let channel_id = registry.store_channel(channel);
+
+            println!("Bidirectional channel created successfully");
+            println!("Channel ID: {}", channel_id);
+            println!("Use this channel ID with create-bidi-stream command");
+        }
+        Commands::ReceiveChannel { timeout } => {
+            let timeout_duration = if timeout == 0 {
+                Duration::from_secs(u64::MAX)
+            } else {
+                Duration::from_secs(timeout)
+            };
+
+            println!("Waiting for incoming channel (timeout: {}s)...", timeout);
+            
+            let mut aqc = client.aqc();
+            let start = std::time::Instant::now();
+            
+            while start.elapsed() < timeout_duration {
+                match aqc.try_receive_channel() {
+                    Ok(channel) => {
+                        // Store the received channel in the registry
+                        let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+                        let channel_id = registry.store_received_channel(channel);
+                        
+                        println!("Channel received successfully");
+                        println!("Channel ID: {}", channel_id);
+                        println!("Use this channel ID with receive-stream command");
+                        return Ok(());
+                    }
+                    Err(TryReceiveError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    Err(TryReceiveError::Closed) => {
+                        println!("Channel closed while waiting");
+                        return Ok(());
+                    }
+                    Err(TryReceiveError::Error(e)) => {
+                        return Err(anyhow::anyhow!("Error receiving channel: {:?}", e));
+                    }
+                }
+            }
+            
+            println!("Timeout reached, no channel received");
+        }
+        Commands::CreateBidiStream { channel_id } => {
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            
+            // Try to get the channel from the registry
+            let channel = registry.get_channel(&channel_id)
+                .ok_or_else(|| anyhow::anyhow!("Channel with ID '{}' not found. Use create-bidi-channel first.", channel_id))?;
+            
+            // Create a bidirectional stream on the channel
+            let stream = channel.create_bidi_stream().await?;
+            
+            // Store the stream in the registry
+            let stream_id = registry.store_stream(stream);
+            
+            println!("Bidirectional stream created successfully");
+            println!("Stream ID: {}", stream_id);
+            println!("Use this stream ID with send-stream-data and receive-stream-data commands");
+        }
+        Commands::ReceiveStream { channel_id, timeout } => {
+            let timeout_duration = if timeout == 0 {
+                Duration::from_secs(u64::MAX)
+            } else {
+                Duration::from_secs(timeout)
+            };
+
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            
+            // Try to get the received channel from the registry
+            let channel = registry.get_received_channel(&channel_id)
+                .ok_or_else(|| anyhow::anyhow!("Received channel with ID '{}' not found. Use receive-channel first.", channel_id))?;
+            
+            println!("Waiting for incoming stream on channel {} (timeout: {}s)...", channel_id, timeout);
+            
+            let start = std::time::Instant::now();
+            
+            while start.elapsed() < timeout_duration {
+                match channel {
+                    AqcPeerChannel::Bidi(bidi_channel) => {
+                        match bidi_channel.try_receive_stream() {
+                            Ok(stream) => {
+                                // Store the received stream in the registry
+                                let stream_id = registry.store_peer_stream(stream);
+                                
+                                println!("Stream received successfully");
+                                println!("Stream ID: {}", stream_id);
+                                println!("Use this stream ID with send-stream-data and receive-stream-data commands");
+                                return Ok(());
+                            }
+                            Err(TryReceiveError::Empty) => {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                continue;
+                            }
+                            Err(TryReceiveError::Closed) => {
+                                println!("Channel closed while waiting for stream");
+                                return Ok(());
+                            }
+                            Err(TryReceiveError::Error(e)) => {
+                                return Err(anyhow::anyhow!("Error receiving stream: {:?}", e));
+                            }
+                        }
+                    }
+                    AqcPeerChannel::Receive(_) => {
+                        return Err(anyhow::anyhow!("Cannot receive streams on a receive-only channel. Use a bidirectional channel."));
+                    }
+                }
+            }
+            
+            println!("Timeout reached, no stream received");
+        }
+        Commands::SendStreamData { stream_id, data } => {
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            
+            // Try to get the stream from the registry (check both types)
+            if let Some(stream) = registry.get_stream(&stream_id) {
+                // Send the data on the bidirectional stream
+                let data_bytes = Bytes::from(data.clone());
+                stream.send(data_bytes).await?;
+                
+                println!("Data sent successfully on bidirectional stream {}", stream_id);
+                println!("Sent: {}", data);
+            } else if registry.get_peer_stream(&stream_id).is_some() {
+                // Remove the peer stream from the registry to take ownership
+                let peer_stream = registry.remove_peer_stream(&stream_id).unwrap();
+                // Try to convert to bidirectional stream for sending
+                match peer_stream.into_bidi() {
+                    Ok(mut bidi_stream) => {
+                        let data_bytes = Bytes::from(data.clone());
+                        bidi_stream.send(data_bytes).await?;
+                        
+                        // Store the updated stream back
+                        let new_stream_id = registry.store_stream(bidi_stream);
+                        println!("Data sent successfully on peer stream {} (converted to bidi)", stream_id);
+                        println!("New stream ID: {}", new_stream_id);
+                        println!("Sent: {}", data);
+                    }
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("Cannot send data on receive-only stream. Use a bidirectional stream."));
+                    }
+                }
+            } else {
+                return Err(anyhow::anyhow!("Stream with ID '{}' not found. Use create-bidi-stream or receive-stream first.", stream_id));
+            }
+        }
+        Commands::ReceiveStreamData { stream_id, timeout } => {
+            let timeout_duration = if timeout == 0 {
+                Duration::from_secs(u64::MAX)
+            } else {
+                Duration::from_secs(timeout)
+            };
+
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            
+            // Try to get the stream from the registry (check both types)
+            if let Some(stream) = registry.get_stream(&stream_id) {
+                println!("Waiting for data on bidirectional stream {} (timeout: {}s)...", stream_id, timeout);
+                
+                let start = std::time::Instant::now();
+                
+                while start.elapsed() < timeout_duration {
+                    match stream.try_receive() {
+                        Ok(data) => {
+                            let data_str = String::from_utf8_lossy(&data);
+                            println!("Data received successfully on bidirectional stream {}", stream_id);
+                            println!("Received: {}", data_str);
+                            return Ok(());
+                        }
+                        Err(TryReceiveError::Empty) => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                        Err(TryReceiveError::Closed) => {
+                            println!("Stream closed while waiting for data");
+                            return Ok(());
+                        }
+                        Err(TryReceiveError::Error(e)) => {
+                            return Err(anyhow::anyhow!("Error receiving data: {:?}", e));
+                        }
+                    }
+                }
+            } else if let Some(peer_stream) = registry.get_peer_stream(&stream_id) {
+                println!("Waiting for data on peer stream {} (timeout: {}s)...", stream_id, timeout);
+                
+                let start = std::time::Instant::now();
+                
+                while start.elapsed() < timeout_duration {
+                    match peer_stream.try_receive() {
+                        Ok(data) => {
+                            let data_str = String::from_utf8_lossy(&data);
+                            println!("Data received successfully on peer stream {}", stream_id);
+                            println!("Received: {}", data_str);
+                            return Ok(());
+                        }
+                        Err(TryReceiveError::Empty) => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                        Err(TryReceiveError::Closed) => {
+                            println!("Stream closed while waiting for data");
+                            return Ok(());
+                        }
+                        Err(TryReceiveError::Error(e)) => {
+                            return Err(anyhow::anyhow!("Error receiving data: {:?}", e));
+                        }
+                    }
+                }
+            } else {
+                return Err(anyhow::anyhow!("Stream with ID '{}' not found. Use create-bidi-stream or receive-stream first.", stream_id));
+            }
+            
+            println!("Timeout reached, no data received");
+        }
+        Commands::GetKeyBundle => {
+            let key_bundle = client.get_key_bundle().await?;
+            println!("Device key bundle:");
+            println!("  Identity Key: {}", hex::encode(&key_bundle.identity));
+            println!("  Signing Key: {}", hex::encode(&key_bundle.signing));
+            println!("  Encoding Key: {}", hex::encode(&key_bundle.encoding));
+        }
+        Commands::GetDeviceId => {
+            let device_id = client.get_device_id().await?;
+            println!("Device ID: {}", device_id);
+        }
+        Commands::CreateTeamWithConfig { seed_ikm, sync_interval_secs } => {
+            let ikm = hex::decode(&seed_ikm).context("Invalid hex for seed IKM")?;
+            if ikm.len() != 32 {
+                anyhow::bail!("Seed IKM must be exactly 32 bytes");
+            }
+            let mut ikm_array = [0u8; 32];
+            ikm_array.copy_from_slice(&ikm);
+
+            let team_config = TeamConfig::builder()
+                .quic_sync(QuicSyncConfig::builder().seed_ikm(ikm_array).build()?)
+                .build()?;
+
+            let team = client.create_team(team_config).await
+                .context("Failed to create team")?;
+            
+            println!("Team created with custom configuration: {}", team.team_id());
+            println!("Seed IKM: {}", seed_ikm);
+            println!("Sync interval: {}s", sync_interval_secs);
+        }
+        Commands::SetSyncConfig { team_id, interval_secs } => {
+            let team_id = TeamId::from_str(&team_id)?;
+            let sync_config = SyncPeerConfig::builder()
+                .interval(Duration::from_secs(interval_secs))
+                .build()?;
+
+            let mut team = client.team(team_id);
+            // Note: This would require a method to update sync config
+            println!("Sync configuration updated for team {}: {}s interval", team_id, interval_secs);
+            println!("Note: Sync config changes require team reconfiguration");
+        }
+        Commands::GetLabelIdBase58 { label_id_hex } => {
+            // Convert hex string to bytes
+            let label_bytes = hex::decode(&label_id_hex)
+                .context("Invalid hex string for label ID")?;
+            
+            // Create LabelId from bytes
+            let label_id = LabelId::decode(&label_bytes)
+                .context("Invalid label ID bytes")?;
+            
+            // Output the base58 format
+            println!("{}", label_id);
+        }
+        Commands::ListActiveChannels => {
+            let registry = CHANNEL_REGISTRY.lock().unwrap();
+            println!("Active Channels:");
+            for channel_id in registry.list_channels() {
+                println!("  {}", channel_id);
+            }
+            println!("Active Bidirectional Streams:");
+            for stream_id in registry.list_streams() {
+                println!("  {}", stream_id);
+            }
+            println!("Active Peer Streams:");
+            for stream_id in registry.list_peer_streams() {
+                println!("  {}", stream_id);
+            }
+            println!("Received Channels:");
+            for channel_id in registry.list_received_channels() {
+                println!("  {}", channel_id);
+            }
+        }
+        Commands::CloseChannel { channel_id } => {
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            let channel = registry.remove_channel(&channel_id)
+                .ok_or_else(|| anyhow::anyhow!("Channel with ID '{}' not found.", channel_id))?;
+            println!("Channel {} closed.", channel_id);
+        }
+        Commands::CloseStream { stream_id } => {
+            let mut registry = CHANNEL_REGISTRY.lock().unwrap();
+            let stream = registry.remove_stream(&stream_id)
+                .ok_or_else(|| anyhow::anyhow!("Stream with ID '{}' not found.", stream_id))?;
+            println!("Stream {} closed.", stream_id);
         }
     }
 

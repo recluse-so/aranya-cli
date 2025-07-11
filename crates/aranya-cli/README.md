@@ -143,3 +143,19 @@ For debugging, use the `-v` or `--verbose` flag to enable detailed logging:
 ```bash
 aranya -v create-team
 ```
+
+
+# Issues
+
+In Rust (main.rs):
+The Aranya client library (aranya_client) manages "active storage" natively. When you call add_team, it returns a Team handle, and all operations on that handle are always "active" for that client. Each device's process has its own client and its own active team context.
+In the CLI:
+There is no explicit mechanism to set the active team/storage for a daemon after joining a team.
+add-team just adds the team to storage, but does not make it active for subsequent commands.
+Only the Owner's daemon (the one that created the team) has the team as active storage by default.
+Other daemons (Admin, Operator, MemberA, MemberB) do not have the team as active storage unless the CLI/daemon provides a command to set it (which, as of now, it does not).
+Result:
+In Rust, every device can operate on the team as "active" because the API enforces it.
+In the CLI, only the Owner can, unless you add a feature/command to set the active team for other daemons.
+You are 100% correct.
+This is the main reason why the CLI-based multi-daemon AQC test can't fully replicate the Rust example's behavior for non-Owner devices.
