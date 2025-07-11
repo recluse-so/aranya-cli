@@ -111,6 +111,9 @@ fi
 sleep 5
 
 # === Minimal channel/key rotation test ===
+# TRY TO create a channel create streaam and send msg.....
+## run two processes using the CLI 
+
 
 for i in 1 2 3; do
     echo ""
